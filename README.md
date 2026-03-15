@@ -41,3 +41,7 @@ PYTHON_BIN=/opt/homebrew/bin/python3.11 ./run_agent.sh
 - 실제 백업 launchd 파일: `/Users/barq/developer/projects/economy-content-agent/deploy/com.barq.economy-agent-backup.plist`
 - launchd 설치 스크립트: `/Users/barq/developer/projects/economy-content-agent/deploy/install_launchd.sh`
 - archive 삭제 체크리스트: `/Users/barq/developer/projects/economy-content-agent/deploy/ARCHIVE_CLEANUP_CHECKLIST.md`
+
+## 보조 도구
+
+- 전문가 데이터 정제 도구: `/Users/barq/developer/projects/economy-content-agent/tools/expert-cleaning`

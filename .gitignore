@@ -13,6 +13,8 @@ failed_url_queue.sqlite3
 ops_events.jsonl
 person_review_memory.json
 backups/
+output/
+tools/expert-cleaning/experts_raw.csv
 deploy/backup.env
 deploy/com.barq.economy-agent.plist
 deploy/com.barq.economy-agent-backup.plist
