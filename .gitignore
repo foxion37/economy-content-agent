@@ -1,0 +1,25 @@
+.DS_Store
+.env
+.venv/
+.claude/
+.vscode/
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime state and local secrets
+credentials.json
+failed_url_queue.sqlite3
+ops_events.jsonl
+person_review_memory.json
+backups/
+deploy/backup.env
+deploy/com.barq.economy-agent.plist
+deploy/com.barq.economy-agent-backup.plist
+
+# Local logs
+agent.log
+agent.launchd.log
+agent.launchd.err.log
+agent.launchd.out.log
+/tmp/
