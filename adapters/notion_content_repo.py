@@ -29,7 +29,7 @@ def get_unprocessed_pages(
             "filter": {
                 "and": [
                     {"property": "URL", "url": {"is_not_empty": True}},
-                    {"property": "주제", "rich_text": {"is_empty": True}},
+                    {"property": "해시태그", "rich_text": {"is_empty": True}},
                 ]
             }
         },
@@ -49,6 +49,7 @@ def write_result(
     role: str,
     now_fn: Callable[[], datetime],
     build_blocks: Callable[[dict[str, Any], str, str, str], list[Any]],
+    channel: str = "",
     out=None,
 ) -> tuple[str, str]:
     hashtags = " ".join(analysis.get("hashtags", []))
@@ -57,6 +58,16 @@ def write_result(
     opinion = analysis.get("opinion", "")
     timestamp = now_fn().strftime("%Y-%m-%d %H:%M")
 
+    mentioned_products = ", ".join(analysis.get("mentioned_products", []))
+    key_sectors = ", ".join(analysis.get("key_sectors", []))
+    outlook = analysis.get("economic_outlook") or {}
+    if isinstance(outlook, dict):
+        direction = outlook.get("direction", "")
+        description = outlook.get("description", "")
+        economic_outlook_text = f"{direction}: {description}" if direction else description
+    else:
+        economic_outlook_text = str(outlook)
+
     def rt(text: str) -> list[dict[str, Any]]:
         return [{"text": {"content": text[:2000]}}]
 
@@ -64,11 +75,15 @@ def write_result(
         page_id=page_id,
         properties={
             "콘텐츠 제목": {"title": rt(video_title)},
-            "주제": {"rich_text": rt(hashtags)},
+            "해시태그": {"rich_text": rt(hashtags)},
             "한 줄 요약": {"rich_text": rt(summary)},
             "출연자": {"rich_text": rt(person_str)},
             "인물의견": {"rich_text": rt(opinion)},
             "처리일시": {"rich_text": rt(timestamp)},
+            "채널": {"rich_text": rt(channel)},
+            "언급 상품": {"rich_text": rt(mentioned_products)},
+            "핵심 섹터": {"rich_text": rt(key_sectors)},
+            "경제 전망": {"rich_text": rt(economic_outlook_text)},
         },
     )
 

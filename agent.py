@@ -18,6 +18,7 @@ import httpx
 import anthropic
 import threading
 import sys
+from pathlib import Path
 from difflib import SequenceMatcher
 from dotenv import load_dotenv
 load_dotenv(
@@ -108,6 +109,11 @@ from services.reports import (
     send_daily_briefing as service_send_daily_briefing,
     send_weekly_report as service_send_weekly_report,
 )
+from services.content_sync import (
+    ContentSyncRecord,
+    classify_sync as service_classify_content_sync,
+    render_sync_report as service_render_content_sync_report,
+)
 from services.people import (
     ExpertSheetSaveDeps,
     PeopleVerificationDeps,
@@ -171,10 +177,28 @@ from services.ops import (
     update_briefing_dispatch_status as service_update_briefing_dispatch_status,
     was_briefing_sent as service_was_briefing_sent,
 )
+from services.trust_store import (
+    bootstrap_person_trust_rows as service_bootstrap_person_trust_rows,
+    ingest_claim_samples as service_ingest_claim_samples,
+    load_claim_override_registry as service_load_claim_override_registry,
+    init_trust_data_db as service_init_trust_data_db,
+    load_claim_sample_docs as service_load_claim_sample_docs,
+    load_person_trust_rows as service_load_person_trust_rows,
+    load_review_queue_rows as service_load_review_queue_rows,
+    load_symbol_mapping_registry as service_load_symbol_mapping_registry,
+    refresh_claim_outcomes as service_refresh_claim_outcomes,
+    recompute_person_trust_scores as service_recompute_person_trust_scores,
+    save_claim_override_registry as service_save_claim_override_registry,
+)
 from workflows.content_pipeline import ContentPipelineDeps, run_content_pipeline
 
+BASE_DIR = os.path.dirname(__file__)
+
 # ── 설정 ────────────────────────────────────────────────
-NOTION_DATABASE_ID = "314883f1-56f5-809e-97ba-fa187bea7e2e"
+DEFAULT_NOTION_DATABASE_ID = "314883f1-56f5-809e-97ba-fa187bea7e2e"
+DEFAULT_GOOGLE_SHEET_ID = "1UQZnkRUNAn1iGiLGtnqfMwEhYbnTBoKpr9J9Y51eYYw"
+DEFAULT_INDICATOR_SHEET_ID = "1fMb1g5HEaAjDjJq5D_PtQEsmBeus4TXr6v8L-36bcp0"
+DEFAULT_PERSON_DB_ID = "31a883f1-56f5-8075-a3ff-e8ee3d83d254"
 
 def _ascii_env(key: str) -> Optional[str]:
     """환경변수에서 비-ASCII 문자(예: \\u2028 LINE SEPARATOR)를 제거하여 반환"""
@@ -190,6 +214,8 @@ GEMINI_API_KEY     = _ascii_env("GEMINI_API_KEY")
 GOOGLE_CSE_ID      = _ascii_env("GOOGLE_CSE_ID")
 GOOGLE_CSE_API_KEY = _ascii_env("GOOGLE_CSE_API_KEY")
 SERPER_API_KEY     = _ascii_env("SERPER_API_KEY")
+EXPECTED_NOTION_BOT_NAME = (os.environ.get("EXPECTED_NOTION_BOT_NAME") or "노션-개발").strip() or "노션-개발"
+NOTION_DATABASE_ID = _ascii_env("NOTION_DATABASE_ID") or DEFAULT_NOTION_DATABASE_ID
 TELEGRAM_BOT_TOKEN  = _ascii_env("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = _ascii_env("TELEGRAM_CHANNEL_ID")
 TELEGRAM_REVIEW_CHAT_ID = _ascii_env("TELEGRAM_REVIEW_CHAT_ID")
@@ -202,8 +228,8 @@ REVIEW_ALERTS_ENABLED = (os.environ.get("REVIEW_ALERTS_ENABLED", "1").strip() no
 POLL_INTERVAL = 60  # 초 단위 노션 폴링 간격
 KST = timezone(timedelta(hours=9))  # 한국 표준시
 
-GOOGLE_SHEET_ID = "1UQZnkRUNAn1iGiLGtnqfMwEhYbnTBoKpr9J9Y51eYYw"
-INDICATOR_SHEET_ID = "1fMb1g5HEaAjDjJq5D_PtQEsmBeus4TXr6v8L-36bcp0"
+GOOGLE_SHEET_ID = _ascii_env("GOOGLE_SHEET_ID") or DEFAULT_GOOGLE_SHEET_ID
+INDICATOR_SHEET_ID = _ascii_env("INDICATOR_SHEET_ID") or DEFAULT_INDICATOR_SHEET_ID
 DAILY_BRIEFING_SHEET_ID = _ascii_env("DAILY_BRIEFING_SHEET_ID") or GOOGLE_SHEET_ID
 DAILY_BRIEFING_TAB = (os.environ.get("DAILY_BRIEFING_TAB") or "Daily_Briefing_Log").strip() or "Daily_Briefing_Log"
 _DAILY_BRIEFING_HEADERS = [
@@ -218,7 +244,7 @@ _SHEET_HEADERS = [
     "출연자(소속/직책/이름)", "인물 의견", "언급 상품", "주요 섹터", "경기 전망", "처리일시",
 ]
 
-PERSON_DB_ID = _ascii_env("PERSON_DB_ID") or "31a883f1-56f5-8075-a3ff-e8ee3d83d254"
+PERSON_DB_ID = _ascii_env("PERSON_DB_ID") or DEFAULT_PERSON_DB_ID
 EXPERT_SHEET_ID = _ascii_env("EXPERT_SHEET_ID") or GOOGLE_SHEET_ID
 EXPERT_SHEET_TAB = (os.environ.get("EXPERT_SHEET_TAB") or "Economic_Expert").strip() or "Economic_Expert"
 _EXPERT_SHEET_HEADERS = [
@@ -226,6 +252,21 @@ _EXPERT_SHEET_HEADERS = [
     "최근 발언일", "최근 채널", "최근 발언", "대표 채널", "채널 TOP3", "일관성 요약",
     "근거 링크", "신뢰도 점수", "신뢰도 상태", "닉네임",
 ]
+EXPERT_SNAPSHOT_TAB = (os.environ.get("EXPERT_SNAPSHOT_TAB") or "Expert_Snapshot").strip() or "Expert_Snapshot"
+_EXPERT_SNAPSHOT_HEADERS = [
+    "person_id", "이름", "닉네임", "identity_status", "person_types",
+    "소속", "직책", "대표 채널", "trust_score_total", "trust_score_band",
+    "trust_score_confidence", "resolved_claim_count", "pending_claim_count",
+    "direction_accuracy", "alpha_score", "source_transparency_score",
+    "contradiction_flag_count", "last_trustscore_updated_at",
+]
+REVIEW_QUEUE_TAB = (os.environ.get("REVIEW_QUEUE_TAB") or "Review_Queue").strip() or "Review_Queue"
+_REVIEW_QUEUE_HEADERS = [
+    "queue_id", "created_at", "queue_type", "priority", "status",
+    "target_type", "target_id", "target_name", "source_url", "evidence_summary",
+    "suggested_action", "owner", "last_reviewed_at", "notes",
+]
+CONTENT_SYNC_REPORT_PATH = str(Path(BASE_DIR) / "handoffs" / f"content-sync-report-{datetime.now(KST).strftime('%Y-%m-%d')}.md")
 CONTENT_PERSON_RELATION_PROP = os.environ.get("CONTENT_PERSON_RELATION_PROP", "인물").strip() or "인물"
 PEOPLE_SYNC_ON_START = (os.environ.get("PEOPLE_SYNC_ON_START", "1").strip() not in ("0", "false", "False"))
 PEOPLE_SYNC_INTERVAL_MIN = int(os.environ.get("PEOPLE_SYNC_INTERVAL_MIN", "5") or "5")
@@ -234,6 +275,7 @@ PEOPLE_DEDUP_INTERVAL_MIN = int(os.environ.get("PEOPLE_DEDUP_INTERVAL_MIN", "5")
 PEOPLE_DAWN_ENABLED = (os.environ.get("PEOPLE_DAWN_ENABLED", "1").strip() not in ("0", "false", "False"))
 PEOPLE_DAWN_HOUR = int(os.environ.get("PEOPLE_DAWN_HOUR", "3") or "3")
 PEOPLE_DAWN_MINUTE = int(os.environ.get("PEOPLE_DAWN_MINUTE", "30") or "30")
+PEOPLE_FULL_CLEAN_WEEKDAY = int(os.environ.get("PEOPLE_FULL_CLEAN_WEEKDAY", "0") or "0")
 PEOPLE_ACCUMULATE_MODE = (os.environ.get("PEOPLE_ACCUMULATE_MODE", "1").strip() not in ("0", "false", "False"))
 PEOPLE_PURGE_ON_MAINTENANCE = (os.environ.get("PEOPLE_PURGE_ON_MAINTENANCE", "0").strip() in ("1", "true", "True"))
 PEOPLE_REBUILD_ON_MAINTENANCE = (os.environ.get("PEOPLE_REBUILD_ON_MAINTENANCE", "0").strip() in ("1", "true", "True"))
@@ -252,6 +294,10 @@ def _sheet_end_col(header_count: int) -> str:
 
 EXPERT_SHEET_END_COL = _sheet_end_col(len(_EXPERT_SHEET_HEADERS))
 EXPERT_SHEET_FULL_RANGE = f"'{EXPERT_SHEET_TAB}'!A:{EXPERT_SHEET_END_COL}"
+EXPERT_SNAPSHOT_END_COL = _sheet_end_col(len(_EXPERT_SNAPSHOT_HEADERS))
+EXPERT_SNAPSHOT_FULL_RANGE = f"'{EXPERT_SNAPSHOT_TAB}'!A:{EXPERT_SNAPSHOT_END_COL}"
+REVIEW_QUEUE_END_COL = _sheet_end_col(len(_REVIEW_QUEUE_HEADERS))
+REVIEW_QUEUE_FULL_RANGE = f"'{REVIEW_QUEUE_TAB}'!A:{REVIEW_QUEUE_END_COL}"
 PERSON_DB_LIST_CACHE_SEC = int(os.environ.get("PERSON_DB_LIST_CACHE_SEC", "20") or "20")
 PERSON_SYNC_SLEEP_SEC = float(os.environ.get("PERSON_SYNC_SLEEP_SEC", "0.2") or "0.2")
 PERSON_CONFIDENCE_MIN = float(os.environ.get("PERSON_CONFIDENCE_MIN", "0.62") or "0.62")
@@ -279,17 +325,40 @@ _PERSON_DB_LOCK = threading.RLock()
 _PERSON_NAME_ALIASES = {
     "홍박사": "홍춘욱",
     "홍춘욱 박사": "홍춘욱",
+    "슈카": "전석재",
+    "수페": "송민섭",
+    "송림": "송팀장",
 }
+_PERSON_CANONICAL_OVERRIDES = {
+    "슈카": "전석재",
+    "수페": "송민섭",
+}
+_PERSON_ALIAS_ONLY_CANONICALS = {
+    "송팀장",
+}
+_PERSON_CHANNEL_URL_OVERRIDES = {
+    "송팀장": "https://www.youtube.com/@CapitalSong",
+}
+_PERSON_ALIAS_SEARCH_CACHE: dict[str, tuple[str, str]] = {}
 _PERSON_RECENT_MATCH: dict[str, tuple[str, float]] = {}
 PERSON_MATCH_COOLDOWN_SEC = int(os.environ.get("PERSON_MATCH_COOLDOWN_SEC", "600") or "600")
 _PERSON_DB_SCHEMA_CACHE: dict[str, any] = {"ts": 0.0, "schema": None}
 _PERSON_DB_LIST_CACHE: dict[str, any] = {"ts": 0.0, "pages": None}
-_PERSON_REVIEW_MEMORY_PATH = os.path.join(os.path.dirname(__file__), "person_review_memory.json")
-_PERSON_REVIEW_BACKUP_DIR = os.path.join(os.path.dirname(__file__), "backups")
+_PERSON_REVIEW_MEMORY_PATH = (
+    os.environ.get("PERSON_REVIEW_MEMORY_PATH")
+    or os.path.join(BASE_DIR, "person_review_memory.json")
+)
+_PERSON_REVIEW_BACKUP_DIR = (
+    os.environ.get("PERSON_REVIEW_BACKUP_DIR")
+    or os.path.join(BASE_DIR, "backups")
+)
 _PERSON_REVIEW_MEMORY: dict[str, dict] = {}
 _PERSON_REVIEW_MEMORY_LOADED = False
 _PERSON_REVIEW_RETENTION_DAYS = int(os.environ.get("PERSON_REVIEW_RETENTION_DAYS", "90") or "90")
-FAILED_URL_QUEUE_PATH = os.path.join(os.path.dirname(__file__), "failed_url_queue.json")
+FAILED_URL_QUEUE_PATH = (
+    os.environ.get("FAILED_URL_QUEUE_PATH")
+    or os.path.join(BASE_DIR, "failed_url_queue.json")
+)
 FAILED_URL_RETRY_MAX = int(os.environ.get("FAILED_URL_RETRY_MAX", "3") or "3")
 FAILED_URL_RETRY_INTERVAL_MIN = int(os.environ.get("FAILED_URL_RETRY_INTERVAL_MIN", "10") or "10")
 FAILED_RETRY_SCHEDULER_ENABLED = (os.environ.get("FAILED_RETRY_SCHEDULER_ENABLED", "1").strip() not in ("0", "false", "False"))
@@ -297,7 +366,26 @@ EXPERT_SHEET_VERIFY_WRITE = (os.environ.get("EXPERT_SHEET_VERIFY_WRITE", "0").st
 OPS_INSIGHT_INTERVAL_MIN = int(os.environ.get("OPS_INSIGHT_INTERVAL_MIN", "360") or "360")
 OPS_INSIGHT_ENABLED = (os.environ.get("OPS_INSIGHT_ENABLED", "1").strip() not in ("0", "false", "False"))
 OPS_INSIGHT_CHAT_ID = _ascii_env("OPS_INSIGHT_CHAT_ID")
-OPS_EVENT_LOG_PATH = os.path.join(os.path.dirname(__file__), "ops_events.jsonl")
+OPS_EVENT_LOG_PATH = (
+    os.environ.get("OPS_EVENT_LOG_PATH")
+    or os.path.join(BASE_DIR, "ops_events.jsonl")
+)
+TRUST_DATA_DB_PATH = (
+    os.environ.get("TRUST_DATA_DB_PATH")
+    or os.path.join(BASE_DIR, "trust_data.sqlite3")
+)
+CLAIM_SAMPLE_DIR = (
+    os.environ.get("CLAIM_SAMPLE_DIR")
+    or os.path.join(BASE_DIR, "analysis", "pilot_samples")
+)
+TRUST_SYMBOL_MAP_PATH = (
+    os.environ.get("TRUST_SYMBOL_MAP_PATH")
+    or os.path.join(BASE_DIR, "data", "trust_symbol_mappings.json")
+)
+TRUST_CLAIM_OVERRIDE_PATH = (
+    os.environ.get("TRUST_CLAIM_OVERRIDE_PATH")
+    or os.path.join(BASE_DIR, "data", "trust_claim_overrides.local.json")
+)
 _FAILED_URL_QUEUE: dict[str, dict] = {}
 _FAILED_URL_QUEUE_LOADED = False
 
@@ -354,6 +442,66 @@ def check_runtime_keys() -> bool:
             ok = False
 
     return ok
+
+
+def check_notion_access() -> None:
+    """Notion 토큰과 DB 권한을 분리해서 진단한다."""
+    print("🔎 Notion token / database access 진단")
+    if not NOTION_API_KEY:
+        print("❌ NOTION_API_KEY 미설정")
+        return
+    try:
+        me_resp = httpx.get(
+            "https://api.notion.com/v1/users/me",
+            headers={
+                "Authorization": f"Bearer {NOTION_API_KEY}",
+                "Notion-Version": "2022-06-28",
+            },
+            timeout=20,
+        )
+        print(f"users/me: {me_resp.status_code}")
+        if me_resp.status_code == 200:
+            try:
+                data = me_resp.json()
+                name = data.get("name", "")
+                print(f"  · bot: {data.get('bot', {}).get('owner', {}).get('type', '')}")
+                print(f"  · name: {name}")
+                print(f"  · expected: {EXPECTED_NOTION_BOT_NAME}")
+                if name and name != EXPECTED_NOTION_BOT_NAME:
+                    print("  ⚠️ 현재 런타임 integration이 개발용 기준과 다릅니다.")
+            except Exception:
+                pass
+        else:
+            print(f"  · body: {me_resp.text[:200]}")
+    except Exception as exc:
+        print(f"users/me 요청 실패: {exc}")
+        return
+
+    try:
+        db_resp = httpx.get(
+            f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}",
+            headers={
+                "Authorization": f"Bearer {NOTION_API_KEY}",
+                "Notion-Version": "2022-06-28",
+            },
+            timeout=20,
+        )
+        print(f"databases/{NOTION_DATABASE_ID}: {db_resp.status_code}")
+        if db_resp.status_code == 200:
+            try:
+                data = db_resp.json()
+                print(f"  · title: {''.join(t.get('plain_text', '') for t in data.get('title', []))}")
+                print(f"  · archived: {data.get('archived', False)}")
+            except Exception:
+                pass
+        else:
+            print(f"  · body: {db_resp.text[:200]}")
+            if db_resp.status_code == 401:
+                print("  → 토큰 자체가 유효하지 않거나 integration 권한이 끊겼을 가능성이 큽니다.")
+            elif db_resp.status_code == 404:
+                print("  → DB가 다른 워크스페이스로 이동했거나 integration에 share되지 않았을 가능성이 큽니다.")
+    except Exception as exc:
+        print(f"database 조회 실패: {exc}")
 
 
 # ── 유튜브 ID 추출 ───────────────────────────────────────
@@ -1033,8 +1181,12 @@ JSON 배열로만 응답 (입력 순서 그대로, 개수 동일):
 
 # ── 구글 시트 클라이언트 ─────────────────────────────────
 def _get_sheets_service():
+    credentials_path = (
+        os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE")
+        or os.path.join(BASE_DIR, "credentials.json")
+    )
     creds = ServiceAccountCredentials.from_service_account_file(
-        "credentials.json",
+        credentials_path,
         scopes=["https://www.googleapis.com/auth/spreadsheets"],
     )
     return build("sheets", "v4", credentials=creds)
@@ -1315,23 +1467,25 @@ def _extract_from_page_blocks(notion: NotionClient, page_id: str) -> dict:
     return result
 
 
-# ── 시트 데이터 검증 및 클렌징 ──────────────────────────
-def _count_complete_notion_pages() -> int:
-    """노션 DB에서 완성된 페이지(URL + 한 줄 요약 있음) 수 반환"""
-    count = 0
+def _build_complete_content_query_body(cursor: Optional[str] = None) -> dict:
+    body: dict = {
+        "filter": {
+            "and": [
+                {"property": "URL", "url": {"is_not_empty": True}},
+                {"property": "한 줄 요약", "rich_text": {"is_not_empty": True}},
+            ]
+        },
+        "page_size": 100,
+    }
+    if cursor:
+        body["start_cursor"] = cursor
+    return body
+
+
+def _fetch_complete_notion_pages() -> list[dict]:
+    pages: list[dict] = []
     cursor = None
     while True:
-        body: dict = {
-            "filter": {
-                "and": [
-                    {"property": "URL", "url": {"is_not_empty": True}},
-                    {"property": "한 줄 요약", "rich_text": {"is_not_empty": True}},
-                ]
-            },
-            "page_size": 100,
-        }
-        if cursor:
-            body["start_cursor"] = cursor
         resp = httpx.post(
             f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query",
             headers={
@@ -1339,16 +1493,21 @@ def _count_complete_notion_pages() -> int:
                 "Notion-Version": "2022-06-28",
                 "Content-Type": "application/json",
             },
-            json=body,
+            json=_build_complete_content_query_body(cursor),
             timeout=30,
         )
         resp.raise_for_status()
         data = resp.json()
-        count += len(data.get("results", []))
+        pages.extend(data.get("results", []))
         if not data.get("has_more"):
             break
         cursor = data.get("next_cursor")
-    return count
+    return pages
+
+
+def _count_complete_notion_pages() -> int:
+    """노션 DB에서 완성된 페이지(URL + 한 줄 요약 있음) 수 반환"""
+    return len(_fetch_complete_notion_pages())
 
 
 def _count_sheet_rows() -> int:
@@ -1363,8 +1522,297 @@ def _count_sheet_rows() -> int:
         return -1
 
 
+def _content_record_from_notion_page(notion: NotionClient, page: dict) -> Optional[ContentSyncRecord]:
+    props = page.get("properties", {})
+    url = props.get("URL", {}).get("url") or ""
+    title_raw = (props.get("콘텐츠 제목", {}) or {}).get("title") or []
+    video_title = title_raw[0]["text"]["content"] if title_raw else ""
+    summary = _get_rich_text(props.get("한 줄 요약", {}))
+    person_str = _get_rich_text(props.get("출연자", {}))
+    opinion = _get_rich_text(props.get("인물의견", {}))
+    if not _is_complete(summary, person_str, opinion):
+        return None
+
+    channel = _get_rich_text(props.get("채널", {})) or _get_rich_text(props.get("채널명", {}))
+    hashtags = _get_rich_text(props.get("해시태그", {})) or _get_rich_text(props.get("주제", {}))
+    timestamp = _get_rich_text(props.get("처리일시", {}))
+    mentioned_products = _get_rich_text(props.get("언급 상품", {}))
+    key_sectors = _get_rich_text(props.get("핵심 섹터", {}))
+    economic_outlook = _get_rich_text(props.get("경제 전망", {}))
+
+    if not all([mentioned_products, key_sectors, economic_outlook]):
+        block_data = _extract_from_page_blocks(notion, page["id"])
+        mentioned_products = mentioned_products or ", ".join(block_data.get("mentioned_products", []))
+        key_sectors = key_sectors or ", ".join(block_data.get("key_sectors", []))
+        economic_outlook = economic_outlook or block_data.get("economic_outlook", "")
+
+    return ContentSyncRecord(
+        url=url,
+        title=video_title,
+        channel=channel,
+        hashtags=hashtags,
+        summary=summary,
+        person_str=person_str,
+        opinion=opinion,
+        mentioned_products=mentioned_products,
+        key_sectors=key_sectors,
+        economic_outlook=economic_outlook,
+        timestamp=timestamp,
+        source="notion",
+        source_ref=page.get("id", ""),
+    )
+
+
+def _content_record_from_sheet_row(row: dict[str, str]) -> Optional[ContentSyncRecord]:
+    url = (row.get("유튜브 URL", "") or "").strip()
+    summary = (row.get("한줄 요약", "") or "").strip()
+    person_str = (row.get("출연자(소속/직책/이름)", "") or "").strip()
+    opinion = (row.get("인물 의견", "") or "").strip()
+    if not url or not _is_complete(summary, person_str, opinion):
+        return None
+
+    return ContentSyncRecord(
+        url=url,
+        title=(row.get("영상 제목", "") or "").strip(),
+        channel=(row.get("채널명", "") or "").strip(),
+        hashtags=(row.get("주제(해시태그)", "") or "").strip(),
+        summary=summary,
+        person_str=person_str,
+        opinion=opinion,
+        mentioned_products=(row.get("언급 상품", "") or "").strip(),
+        key_sectors=(row.get("주요 섹터", "") or "").strip(),
+        economic_outlook=(row.get("경기 전망", "") or "").strip(),
+        timestamp=(row.get("처리일시", "") or "").strip(),
+        source="sheet",
+        source_ref=url,
+    )
+
+
+def _load_complete_notion_content_records(notion: NotionClient) -> list[ContentSyncRecord]:
+    records: list[ContentSyncRecord] = []
+    for page in _fetch_complete_notion_pages():
+        record = _content_record_from_notion_page(notion, page)
+        if record:
+            records.append(record)
+    return records
+
+
+def _load_complete_sheet_content_records() -> list[ContentSyncRecord]:
+    records: list[ContentSyncRecord] = []
+    for row in read_sheet_rows():
+        record = _content_record_from_sheet_row(row)
+        if record:
+            records.append(record)
+    return records
+
+
+def _content_record_to_sheet_row(record: ContentSyncRecord) -> list[str]:
+    return [
+        record.url,
+        record.title,
+        record.channel,
+        record.hashtags,
+        record.summary,
+        record.person_str,
+        record.opinion,
+        record.mentioned_products,
+        record.key_sectors,
+        record.economic_outlook,
+        record.timestamp,
+    ]
+
+
+def _ensure_content_sheet_headers(service) -> set[str]:
+    sheet = service.spreadsheets()
+    existing_rows = sheet.values().get(
+        spreadsheetId=GOOGLE_SHEET_ID,
+        range="A:K",
+    ).execute().get("values", [])
+    if not existing_rows:
+        sheet.values().update(
+            spreadsheetId=GOOGLE_SHEET_ID,
+            range="A1",
+            valueInputOption="RAW",
+            body={"values": [_SHEET_HEADERS]},
+        ).execute()
+        return set()
+    return {row[0] for row in existing_rows[1:] if row and row[0]}
+
+
+def _append_content_record_to_sheet(service, record: ContentSyncRecord, existing_urls: set[str]) -> bool:
+    if not record.url or record.url in existing_urls:
+        return False
+    service.spreadsheets().values().append(
+        spreadsheetId=GOOGLE_SHEET_ID,
+        range="A:K",
+        valueInputOption="RAW",
+        insertDataOption="INSERT_ROWS",
+        body={"values": [_content_record_to_sheet_row(record)]},
+    ).execute()
+    existing_urls.add(record.url)
+    return True
+
+
+def _rich_text_prop(value: str) -> list[dict]:
+    text = (value or "").strip()
+    if not text:
+        return []
+    return [{"text": {"content": text[:2000]}}]
+
+
+def _update_content_page_properties_from_record(notion: NotionClient, page_id: str, record: ContentSyncRecord) -> None:
+    properties: dict[str, dict] = {
+        "한 줄 요약": {"rich_text": _rich_text_prop(record.summary)},
+        "출연자": {"rich_text": _rich_text_prop(record.person_str)},
+        "인물의견": {"rich_text": _rich_text_prop(record.opinion)},
+        "처리일시": {"rich_text": _rich_text_prop(record.timestamp)},
+        "채널": {"rich_text": _rich_text_prop(record.channel)},
+        "해시태그": {"rich_text": _rich_text_prop(record.hashtags)},
+        "언급 상품": {"rich_text": _rich_text_prop(record.mentioned_products)},
+        "핵심 섹터": {"rich_text": _rich_text_prop(record.key_sectors)},
+        "경제 전망": {"rich_text": _rich_text_prop(record.economic_outlook)},
+    }
+    if record.title.strip():
+        properties["콘텐츠 제목"] = {"title": _rich_text_prop(record.title)}
+    notion.pages.update(page_id=page_id, properties=properties)
+
+
+def _find_notion_content_page_by_url(url: str) -> Optional[str]:
+    if not url:
+        return None
+    resp = httpx.post(
+        f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query",
+        headers={
+            "Authorization": f"Bearer {NOTION_API_KEY}",
+            "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json",
+        },
+        json={
+            "filter": {"property": "URL", "url": {"equals": url}},
+            "page_size": 1,
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+    return results[0]["id"] if results else None
+
+
+def _create_notion_page_from_record(notion: NotionClient, record: ContentSyncRecord) -> str:
+    page_id = _find_notion_content_page_by_url(record.url) or create_notion_page_from_url(notion, record.url)
+    _update_content_page_properties_from_record(notion, page_id, record)
+    return page_id
+
+
+def _write_content_sync_report(sync_result: dict[str, object], notion_total: int, sheet_total: int) -> str:
+    report = service_render_content_sync_report(
+        sync_result,
+        notion_total=notion_total,
+        sheet_total=sheet_total,
+    )
+    Path(CONTENT_SYNC_REPORT_PATH).write_text(report + "\n", encoding="utf-8")
+    return CONTENT_SYNC_REPORT_PATH
+
+
+def _write_content_sync_blocked_report(reason: str, sheet_total: int) -> str:
+    report = "\n".join(
+        [
+            "# Content Sync Report",
+            "",
+            "## Summary",
+            "- Status: blocked",
+            "- Notion complete rows: unavailable",
+            f"- Sheets complete rows: {sheet_total}",
+            "",
+            "## Blocker",
+            f"- {reason}",
+            "",
+            "## Next Step",
+            f"- Share the Notion 경제 콘텐츠 DB with the development integration `{EXPECTED_NOTION_BOT_NAME}`, then rerun `python agent.py --check-content-sync`.",
+            "",
+        ]
+    )
+    Path(CONTENT_SYNC_REPORT_PATH).write_text(report + "\n", encoding="utf-8")
+    return CONTENT_SYNC_REPORT_PATH
+
+
+def _print_content_sync_summary(sync_result: dict[str, object], report_path: str = "") -> None:
+    print("\n🔍 콘텐츠 동기화 점검")
+    if sync_result.get("blocked"):
+        print("  - status: blocked")
+        print(f"  - reason: {sync_result.get('reason', '')}")
+        if report_path:
+            print(f"  - report: {report_path}")
+        return
+    print(f"  - in_sync: {len(sync_result['in_sync'])}")
+    print(f"  - only_notion: {len(sync_result['only_notion'])}")
+    print(f"  - only_sheet: {len(sync_result['only_sheet'])}")
+    print(f"  - field_conflict: {len(sync_result['field_conflict'])}")
+    if report_path:
+        print(f"  - report: {report_path}")
+
+
+def check_content_sync_status(write_report: bool = True) -> dict[str, object]:
+    sheet_records = _load_complete_sheet_content_records()
+    try:
+        notion = get_notion_client()
+        notion_records = _load_complete_notion_content_records(notion)
+    except Exception as exc:
+        reason = f"Notion content DB 접근 실패: {exc}"
+        sync_result = {
+            "in_sync": [],
+            "only_notion": [],
+            "only_sheet": [],
+            "field_conflict": [],
+            "blocked": True,
+            "reason": reason,
+        }
+        report_path = _write_content_sync_blocked_report(reason, len(sheet_records)) if write_report else ""
+        _print_content_sync_summary(sync_result, report_path)
+        return sync_result
+
+    sync_result = service_classify_content_sync(notion_records, sheet_records)
+    report_path = _write_content_sync_report(sync_result, len(notion_records), len(sheet_records)) if write_report else ""
+    _print_content_sync_summary(sync_result, report_path)
+    return sync_result
+
+
+def reconcile_content_sync() -> dict[str, int]:
+    notion = get_notion_client()
+    service = _get_sheets_service()
+    sync_result = check_content_sync_status(write_report=True)
+    if sync_result.get("blocked"):
+        print("\n❌ 콘텐츠 동기화 보정 중단 — Notion 콘텐츠 DB 접근부터 복구해야 합니다.")
+        return {"sheets_add": 0, "notion_add": 0, "conflicts": 0}
+
+    existing_urls = _ensure_content_sheet_headers(service)
+    appended_sheet = 0
+    created_notion = 0
+
+    for record in sync_result["only_notion"]:
+        if _append_content_record_to_sheet(service, record, existing_urls):
+            appended_sheet += 1
+
+    for record in sync_result["only_sheet"]:
+        if not record.url:
+            continue
+        _create_notion_page_from_record(notion, record)
+        created_notion += 1
+
+    final_result = check_content_sync_status(write_report=True)
+    print(
+        "\n✅ 콘텐츠 동기화 반영 완료"
+        f" — sheets_add={appended_sheet}, notion_add={created_notion}, conflicts={len(final_result['field_conflict'])}"
+    )
+    return {
+        "sheets_add": appended_sheet,
+        "notion_add": created_notion,
+        "conflicts": len(final_result["field_conflict"]),
+    }
+
+
 def _validate_and_cleanse_sheets():
-    """노션 완성 페이지 수와 시트 행 수를 비교, 불일치 시 시트 초기화 후 재동기화"""
+    """행 수 차이를 참고로만 보여주고, 실제 판단은 URL 기반 diff로 위임."""
     notion_count = _count_complete_notion_pages()
     sheet_count = _count_sheet_rows()
 
@@ -1376,157 +1824,51 @@ def _validate_and_cleanse_sheets():
 
     if notion_count == sheet_count:
         print("✅ 데이터 수 일치 확인")
-        return
+    else:
+        diff = abs(notion_count - sheet_count)
+        print(f"⚠️ 데이터 수 불일치 ({diff}개 차이) — URL 기준 diff 점검으로 이어집니다.")
 
-    diff = abs(notion_count - sheet_count)
-    print(f"⚠️ 데이터 불일치 ({diff}개 차이) — 노션 기준으로 시트 클렌징 시작...")
-
-    # 시트 전체 초기화 (헤더 유지)
-    if sheet_count > 0:
-        try:
-            service = _get_sheets_service()
-            service.spreadsheets().values().clear(
-                spreadsheetId=GOOGLE_SHEET_ID,
-                range=f"A2:Z{sheet_count + 1}",
-            ).execute()
-            print(f"  → 기존 {sheet_count}개 행 삭제 완료")
-        except Exception as e:
-            print(f"  ❌ 시트 초기화 실패: {e}")
-            return
-
-    # 노션 기준으로 재동기화 (검증 루프 방지를 위해 _skip_validate=True)
-    sync_sheets_from_notion(_skip_validate=True)
+    check_content_sync_status(write_report=True)
 
 
 # ── 노션 → 구글 시트 일괄 동기화 ────────────────────────
 def sync_sheets_from_notion(_skip_validate: bool = False):
-    """노션 DB의 완성된 항목(summary 존재)을 구글 시트로 일괄 이전"""
+    """노션 DB의 완성된 항목을 기준으로 시트에 백필."""
     notion = get_notion_client()
-
-    # 분석 완료 페이지 전체 조회 (한 줄 요약이 있는 것)
-    pages: list[dict] = []
-    cursor = None
-    while True:
-        body: dict = {
-            "filter": {
-                "and": [
-                    {"property": "URL", "url": {"is_not_empty": True}},
-                    {"property": "한 줄 요약", "rich_text": {"is_not_empty": True}},
-                ]
-            },
-            "page_size": 100,
-        }
-        if cursor:
-            body["start_cursor"] = cursor
-        resp = httpx.post(
-            f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query",
-            headers={
-                "Authorization": f"Bearer {NOTION_API_KEY}",
-                "Notion-Version": "2022-06-28",
-                "Content-Type": "application/json",
-            },
-            json=body,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        pages.extend(data.get("results", []))
-        if not data.get("has_more"):
-            break
-        cursor = data.get("next_cursor")
-
-    total = len(pages)
+    records = _load_complete_notion_content_records(notion)
+    total = len(records)
     print(f"\n📋 동기화 대상 후보: {total}개 페이지\n")
     if total == 0:
         print("동기화할 데이터가 없습니다.")
         return
 
-    # 시트 기존 URL 수집 + 헤더 확인
     try:
         service = _get_sheets_service()
-        sheet = service.spreadsheets()
-        existing_rows = sheet.values().get(
-            spreadsheetId=GOOGLE_SHEET_ID, range="A:A"
-        ).execute().get("values", [])
-
-        if not existing_rows:
-            sheet.values().update(
-                spreadsheetId=GOOGLE_SHEET_ID,
-                range="A1",
-                valueInputOption="RAW",
-                body={"values": [_SHEET_HEADERS]},
-            ).execute()
-            existing_urls: set[str] = set()
-        else:
-            existing_urls = {row[0] for row in existing_rows[1:] if row}
+        existing_urls = _ensure_content_sheet_headers(service)
     except Exception as e:
         print(f"❌ 구글 시트 초기화 실패: {e}")
         return
 
-    synced = skipped_dup = skipped_incomplete = 0
+    synced = skipped_dup = 0
 
-    for i, page in enumerate(pages, 1):
-        props = page.get("properties", {})
-        url = props.get("URL", {}).get("url") or ""
-
-        title_raw = (props.get("콘텐츠 제목", {}) or {}).get("title") or []
-        video_title = title_raw[0]["text"]["content"] if title_raw else ""
-
-        summary    = _get_rich_text(props.get("한 줄 요약", {}))
-        person_str = _get_rich_text(props.get("출연자", {}))
-        opinion    = _get_rich_text(props.get("인물의견", {}))
-        hashtags   = _get_rich_text(props.get("주제", {}))
-        timestamp  = _get_rich_text(props.get("처리일시", {}))
-
-        label = f"[{i}/{total}] {video_title[:40]}"
-
-        # 완성도 검증
-        if not _is_complete(summary, person_str, opinion):
-            skipped_incomplete += 1
-            print(f"{label} — 스킵 (미완성)")
-            continue
-
-        # 중복 URL 검증
-        if url in existing_urls:
+    for i, record in enumerate(records, 1):
+        label = f"[{i}/{total}] {record.title[:40]}"
+        if record.url in existing_urls:
             skipped_dup += 1
             print(f"{label} — 스킵 (중복)")
             continue
 
-        # 본문 블록에서 상품·섹터·전망 추출
-        block_data = _extract_from_page_blocks(notion, page["id"])
-
-        row = [
-            url,
-            video_title,
-            "",  # 채널명: 노션 속성에 미저장
-            hashtags,
-            summary,
-            person_str,
-            opinion,
-            ", ".join(block_data.get("mentioned_products", [])),
-            ", ".join(block_data.get("key_sectors", [])),
-            block_data.get("economic_outlook", ""),
-            timestamp,
-        ]
-
         try:
-            sheet.values().append(
-                spreadsheetId=GOOGLE_SHEET_ID,
-                range="A:K",
-                valueInputOption="RAW",
-                insertDataOption="INSERT_ROWS",
-                body={"values": [row]},
-            ).execute()
-            existing_urls.add(url)
-            synced += 1
-            print(f"{label} — ✓ 기록")
+            if _append_content_record_to_sheet(service, record, existing_urls):
+                synced += 1
+                print(f"{label} — ✓ 기록")
         except Exception as e:
             print(f"{label} — ❌ 실패: {e}")
 
         time.sleep(0.3)  # Sheets API 레이트 리밋 방지
 
     print(f"\n{'='*50}")
-    print(f"✅ 동기화 완료 — 기록: {synced}개 / 중복 스킵: {skipped_dup}개 / 미완성 스킵: {skipped_incomplete}개")
+    print(f"✅ 동기화 완료 — 기록: {synced}개 / 중복 스킵: {skipped_dup}개")
     print(f"{'='*50}")
 
     if not _skip_validate:
@@ -1726,6 +2068,7 @@ def write_notion_result(
     verified_name: str,
     verified_affiliation: str,
     role: str,
+    channel: str = "",
 ) -> tuple[str, str]:
     """노션 페이지를 업데이트하고 (person_str, timestamp) 반환"""
     return adapter_write_notion_result(
@@ -1738,6 +2081,7 @@ def write_notion_result(
         role=role,
         now_fn=lambda: datetime.now(KST),
         build_blocks=_build_notion_body_blocks,
+        channel=channel,
         out=print,
     )
 
@@ -1932,15 +2276,200 @@ def _sanitize_person_fields(name: str, affiliation: str, role: str) -> tuple[str
     return name, affiliation, role
 
 
+def _extract_alias_real_name_pair(name: str) -> tuple[str, str]:
+    text = _normalize_identity_text(name)
+    if not text:
+        return "", ""
+    match = re.match(r"(.+?)\s*\(([^)]+)\)", text)
+    if not match:
+        return "", ""
+    outer = _normalize_identity_text(match.group(1))
+    inner = _normalize_identity_text(match.group(2))
+    if _is_likely_korean_fullname(inner):
+        return inner, outer
+    if _is_likely_korean_fullname(outer):
+        return outer, inner
+    return "", ""
+
+
+def _resolve_canonical_name_from_search(
+    name: str,
+    affiliation: str,
+    role: str,
+    channel: str = "",
+) -> tuple[str, str]:
+    cache_key = _compact_identity_text(f"{name}|{affiliation}|{role}|{channel}")
+    cached = _PERSON_ALIAS_SEARCH_CACHE.get(cache_key)
+    if cached:
+        return cached
+
+    queries = [
+        f"{name} {channel} 본명" if channel else "",
+        f"{name} {affiliation} 실명",
+        f"{name} 경제 유튜버 본명",
+        f"{name} 투자 유튜버 본명",
+    ]
+    items: list[dict] = []
+    for query in queries:
+        if not query.strip():
+            continue
+        got = _google_search_items(query, num=5)
+        if got:
+            items = got
+            break
+    snippets = " ".join(i.get("snippet", "") for i in items)
+    if not snippets.strip():
+        _PERSON_ALIAS_SEARCH_CACHE[cache_key] = (name, "")
+        return name, ""
+
+    result = _gemini_json(f"""아래 검색 결과를 보고 인물 활동명/본명을 정리하세요.
+
+입력 이름: {name}
+입력 소속: {affiliation}
+입력 직책: {role}
+입력 채널: {channel}
+
+검색 결과:
+{snippets[:2000]}
+
+규칙:
+- 입력 이름이 활동명/닉네임이면 canonical_name에는 공개적으로 확인 가능한 실명을 적으세요.
+- alias_name에는 활동명/닉네임을 적으세요.
+- 실명을 확인할 수 없으면 canonical_name은 입력 이름 그대로 두고 alias_name은 빈 문자열로 두세요.
+
+JSON으로만 응답:
+{{"canonical_name":"실명 또는 입력 이름", "alias_name":"활동명 또는 빈 문자열", "confidence":0.0}}""")
+
+    canonical_name = name
+    alias_name = ""
+    if isinstance(result, dict):
+        cand = _normalize_identity_text(result.get("canonical_name", "") or name)
+        alias = _normalize_identity_text(result.get("alias_name", "") or "")
+        conf = float(result.get("confidence", 0.0) or 0.0)
+        if cand and conf >= 0.72:
+            canonical_name = cand
+            alias_name = alias
+    _PERSON_ALIAS_SEARCH_CACHE[cache_key] = (canonical_name, alias_name)
+    return canonical_name, alias_name
+
+
+def _resolve_canonical_person_identity(
+    name: str,
+    affiliation: str = "",
+    role: str = "",
+    channel: str = "",
+) -> tuple[str, str]:
+    canonical_name, affiliation, role = _sanitize_person_fields(name, affiliation, role)
+    alias_name = ""
+
+    if canonical_name in _PERSON_CANONICAL_OVERRIDES:
+        return _PERSON_CANONICAL_OVERRIDES[canonical_name], canonical_name
+
+    if _is_alias_only_persona_name(canonical_name, channel=channel):
+        return canonical_name, ""
+
+    pair_name, pair_alias = _extract_alias_real_name_pair(canonical_name)
+    if pair_name:
+        return pair_name, pair_alias
+
+    if _is_unknown_person_name(canonical_name):
+        return canonical_name, alias_name
+
+    # 3글자 이상 한국식 실명은 그대로 유지한다.
+    if re.fullmatch(r"[가-힣]{3,4}", canonical_name):
+        return canonical_name, alias_name
+
+    # 활동명/짧은 이름은 검색으로 실명 보강을 시도한다.
+    if len(canonical_name) <= 2 or not _is_likely_korean_fullname(canonical_name):
+        resolved_name, resolved_alias = _resolve_canonical_name_from_search(
+            canonical_name,
+            affiliation,
+            role,
+            channel=channel,
+        )
+        resolved_name, _, _ = _sanitize_person_fields(resolved_name, affiliation, role)
+        if resolved_name and resolved_name != canonical_name:
+            alias_name = resolved_alias or canonical_name
+            return resolved_name, alias_name
+
+    return canonical_name, alias_name
+
+
 def _is_likely_korean_fullname(name: str) -> bool:
     n = _normalize_identity_text(name)
     # 전형적인 한국 이름: 한글 2~4자 (예: 홍춘욱, 김단태, 미키김은 False 처리)
     return bool(re.fullmatch(r"[가-힣]{2,4}", n))
 
 
-def _nickname_value(name: str) -> str:
+def _nickname_value(name: str, alias_name: str = "") -> str:
+    alias = _normalize_identity_text(alias_name)
+    if alias:
+        return alias
     n = _normalize_identity_text(name)
     return n if n and not _is_likely_korean_fullname(n) else ""
+
+
+def _is_alias_only_persona_name(
+    name: str,
+    channel: str = "",
+    source_url: str = "",
+) -> bool:
+    normalized = _normalize_identity_text(name)
+    if not normalized:
+        return False
+    if normalized in _PERSON_ALIAS_ONLY_CANONICALS:
+        return True
+    persona_suffixes = ("팀장", "실장", "소장", "대표", "원장", "센터장")
+    if not any(normalized.endswith(suffix) for suffix in persona_suffixes):
+        return False
+    if source_url and _is_youtube_url(source_url):
+        return True
+    compact_name = _compact_identity_text(normalized)
+    compact_channel = _compact_identity_text(channel)
+    return bool(compact_name and compact_channel and compact_name in compact_channel)
+
+
+def _override_person_source_url(
+    name: str,
+    channel: str = "",
+    source_url: str = "",
+) -> str:
+    normalized = _normalize_identity_text(name)
+    override = _PERSON_CHANNEL_URL_OVERRIDES.get(normalized, "")
+    if override:
+        return override
+    if _is_alias_only_persona_name(normalized, channel=channel, source_url=source_url) and source_url and _is_youtube_url(source_url):
+        return source_url
+    return source_url
+
+
+def _person_identity_gate_reasons(
+    name: str,
+    alias_name: str,
+    channel: str,
+    source_url: str,
+) -> list[str]:
+    reasons: list[str] = []
+    normalized = _normalize_identity_text(name)
+    compact = _compact_identity_text(name)
+    if _is_unknown_person_name(normalized):
+        reasons.append("실명 미확정")
+        return reasons
+    if _is_alias_only_persona_name(normalized, channel=channel, source_url=source_url):
+        if not source_url or not _is_youtube_url(source_url):
+            reasons.append("활동명 기반 인물이라 유튜브 채널 근거 링크 필요")
+        return reasons
+    if len(compact) <= 1:
+        reasons.append("한 글자 이름으로 보여 실명 검증 필요")
+    if alias_name:
+        return reasons
+    if len(normalized) <= 2 and source_url and not _is_youtube_url(source_url):
+        reasons.append("짧은 이름인데 비유튜브 근거만 있어 실명 검증 필요")
+    if "(" in normalized or ")" in normalized:
+        reasons.append("이름에 별칭/괄호 표기가 남아 있음")
+    if not _is_likely_korean_fullname(normalized) and channel:
+        reasons.append("활동명 또는 채널 파생 이름으로 보여 실명 검증 필요")
+    return reasons
 
 
 def _is_unknown_person_name(name: str) -> bool:
@@ -2231,6 +2760,9 @@ def _is_uncertain_person(
             is_non_economic_profile=_is_non_economic_profile,
             needs_person_category_review=_needs_person_category_review,
             is_likely_korean_fullname=_is_likely_korean_fullname,
+            is_alias_only_persona_name=lambda person_name, source_url="": _is_alias_only_persona_name(
+                person_name, source_url=source_url
+            ),
             find_conflicting_candidates=_find_conflicting_candidates,
             is_youtube_url=_is_youtube_url,
             score_person_confidence=lambda aff, rl, cr, ex, src, yt, cnt, non: _score_person_confidence(
@@ -2467,6 +2999,20 @@ def _get_person_prop(page: dict, prop_name: str) -> str:
         "전문 분야": ["전문분야", "Expertise", "분야"],
         "등장 횟수": ["등장횟수", "Appearance Count", "Count", "횟수"],
         "근거 링크": ["출처 링크", "Reference URL", "URL", "링크"],
+        "신뢰도 점수": ["Confidence Score", "confidence_score"],
+        "신뢰도 상태": ["Confidence Status", "identity_status"],
+        "닉네임": ["별칭", "Alias", "alias_name"],
+        "인물 유형": ["person_types", "Person Types", "타입", "유형"],
+        "TrustScore": ["trust_score_total", "Trust Score"],
+        "TrustScore 밴드": ["trust_score_band", "Trust Score Band"],
+        "TrustScore 신뢰도": ["trust_score_confidence", "Trust Score Confidence"],
+        "해결 claim 수": ["resolved_claim_count", "Resolved Claim Count"],
+        "대기 claim 수": ["pending_claim_count", "Pending Claim Count"],
+        "방향 적중률": ["direction_accuracy", "Direction Accuracy"],
+        "알파 점수": ["alpha_score", "Alpha Score"],
+        "근거 제시 점수": ["source_transparency_score", "Source Transparency Score"],
+        "입장 번복 플래그 수": ["contradiction_flag_count", "Contradiction Flag Count"],
+        "마지막 TrustScore 갱신": ["last_trustscore_updated_at", "Last TrustScore Updated At"],
     }
     for alt in aliases.get(prop_name, []):
         if alt in props:
@@ -2508,7 +3054,11 @@ def collect_person_info_from_search(name: str, affiliation: str, role: str, chan
             break
 
     snippets = " ".join(i.get("snippet", "") for i in items)
-    source_url = _pick_best_source_link(items, name, affiliation)
+    source_url = _override_person_source_url(
+        name,
+        channel=channel,
+        source_url=_pick_best_source_link(items, name, affiliation),
+    )
     if not snippets:
         return {
             "affiliation": affiliation or "정보 없음",
@@ -2565,7 +3115,11 @@ JSON으로만 응답:
                 strict_items = got
                 break
         strict_snippets = " ".join(i.get("snippet", "") for i in strict_items)
-        strict_source = _pick_best_source_link(strict_items, name, affiliation) or source_url
+        strict_source = _override_person_source_url(
+            name,
+            channel=channel,
+            source_url=_pick_best_source_link(strict_items, name, affiliation) or source_url,
+        )
 
         strict_result = _gemini_json(f"""아래 검색 결과에서 '경제/금융/투자 분야 인물' 기준으로만 {name} 정보를 추출하세요.
 경제와 무관한 직업 정보(연예/스포츠/의료/법조 등)라면 '미상/정보 없음'으로 반환하세요.
@@ -2737,13 +3291,21 @@ def _update_existing_person_record(
 
 
 def _set_person_source_url_if_missing(notion: NotionClient, page_id: str, source_url: str):
-    """인물 페이지에 근거 링크가 비어있을 때만 저장."""
+    """인물 페이지에 근거 링크가 비어 있거나 더 좋은 유튜브 근거가 있으면 저장."""
     if not source_url:
         return
     try:
         page = notion.pages.retrieve(page_id=page_id)
         current = _get_person_prop(page, "근거 링크")
-        if current:
+        person_name = _get_person_prop(page, "이름")
+        channel = _get_person_prop(page, "대표 채널") or _get_person_prop(page, "최근 채널")
+        preferred_url = _override_person_source_url(person_name, channel=channel, source_url=source_url)
+        should_upgrade = bool(
+            preferred_url
+            and preferred_url != current
+            and (not current or not _is_youtube_url(current))
+        )
+        if current and not should_upgrade:
             return
         schema = _get_person_db_schema(notion)
         fields = _resolve_person_fields(schema)
@@ -2752,7 +3314,7 @@ def _set_person_source_url_if_missing(notion: NotionClient, page_id: str, source
             return
         ptype = schema.get(prop_name, "url")
         payload = _build_person_prop_value(
-            ptype, source_url,
+            ptype, preferred_url or source_url,
             lambda t: [{"text": {"content": str(t)[:2000]}}],
             lambda t: [],
         )
@@ -2805,6 +3367,79 @@ def _backfill_person_profile(
         pass
 
 
+def _update_person_review_status(
+    notion: NotionClient,
+    page_id: str,
+    confidence_status: str,
+) -> None:
+    schema = _get_person_db_schema(notion)
+    fields = _resolve_person_fields(schema)
+    status_prop = fields.get("confidence_status")
+    if not status_prop:
+        return
+    ptype = schema.get(status_prop, "rich_text")
+    payload = _build_person_prop_value(
+        ptype,
+        confidence_status,
+        lambda t: [{"text": {"content": str(t)[:2000]}}],
+        lambda t: [],
+    )
+    notion.pages.update(page_id=page_id, properties={status_prop: payload})
+
+
+def _weekly_person_identity_audit(notion: NotionClient) -> dict:
+    all_persons = _get_all_persons_from_db(notion)
+    suspicious = 0
+    canonicalized = 0
+    archived = 0
+    samples: list[str] = []
+    for person in all_persons:
+        page_id = person.get("id", "")
+        name = _get_person_prop(person, "이름")
+        aff = _get_person_prop(person, "소속")
+        role = _get_person_prop(person, "직책")
+        source_url = _get_person_prop(person, "근거 링크")
+        channel = _get_person_prop(person, "대표 채널") or _get_person_prop(person, "최근 채널")
+
+        canonical_name, alias_name = _resolve_canonical_person_identity(name, aff, role, channel=channel)
+        if canonical_name != name or (_nickname_value(canonical_name, alias_name) != _get_person_prop(person, "닉네임")):
+            _sync_person_identity_props(notion, page_id, canonical_name, alias_name)
+            canonicalized += 1
+
+        preferred_source_url = _override_person_source_url(canonical_name, channel=channel, source_url=source_url)
+        if preferred_source_url and preferred_source_url != source_url:
+            _set_person_source_url_if_missing(notion, page_id, preferred_source_url)
+            source_url = preferred_source_url
+
+        reasons = _person_identity_gate_reasons(canonical_name, alias_name, channel, source_url)
+        if reasons:
+            suspicious += 1
+            if len(samples) < 10:
+                samples.append(f"{canonical_name}: {reasons[0]}")
+            try:
+                _update_person_review_status(notion, page_id, "검토 필요")
+            except Exception:
+                pass
+            if _is_unknown_person_name(canonical_name) or len(_compact_identity_text(canonical_name)) <= 1:
+                try:
+                    notion.pages.update(page_id=page_id, archived=True)
+                    archived += 1
+                except Exception:
+                    pass
+        elif _is_alias_only_persona_name(canonical_name, channel=channel, source_url=source_url):
+            try:
+                _update_person_review_status(notion, page_id, "활동명 확정")
+            except Exception:
+                pass
+    _invalidate_person_db_cache()
+    return {
+        "suspicious": suspicious,
+        "canonicalized": canonicalized,
+        "archived": archived,
+        "samples": samples,
+    }
+
+
 def _sync_person_summary_props(
     notion: NotionClient,
     page_id: str,
@@ -2813,6 +3448,7 @@ def _sync_person_summary_props(
     source_url: str = "",
     confidence_score: str = "",
     confidence_status: str = "",
+    alias_name: str = "",
 ):
     """인물 페이지 본문 요약값을 Notion 속성(컬럼)에도 동기화."""
     try:
@@ -2836,7 +3472,7 @@ def _sync_person_summary_props(
             ("consistency_summary", body_fields.get("consistency_summary", "")),
             ("confidence_score", confidence_score),
             ("confidence_status", confidence_status),
-            ("nickname", _nickname_value(name)),
+            ("nickname", _nickname_value(name, alias_name)),
         ):
             prop_name = fields.get(logical)
             if not prop_name:
@@ -2853,6 +3489,44 @@ def _sync_person_summary_props(
             notion.pages.update(page_id=page_id, properties=updates)
     except Exception as e:
         print(f"  ⚠️ 인물 요약 속성 동기화 실패: {e}")
+
+
+def _sync_person_identity_props(
+    notion: NotionClient,
+    page_id: str,
+    canonical_name: str,
+    alias_name: str = "",
+):
+    try:
+        _ensure_person_db_extra_columns(notion)
+        schema = _get_person_db_schema(notion)
+        fields = _resolve_person_fields(schema)
+
+        def rt(text: str) -> list:
+            return [{"text": {"content": str(text)[:2000]}}]
+
+        def ms(_: str) -> list:
+            return []
+
+        updates: dict = {}
+        name_prop = fields.get("name")
+        if name_prop and canonical_name:
+            ptype = schema.get(name_prop, "title")
+            updates[name_prop] = _build_person_prop_value(ptype, canonical_name, rt, ms)
+
+        nickname_prop = fields.get("nickname")
+        if nickname_prop:
+            ptype = schema.get(nickname_prop, "rich_text")
+            updates[nickname_prop] = _build_person_prop_value(
+                ptype,
+                _nickname_value(canonical_name, alias_name),
+                rt,
+                ms,
+            )
+        if updates:
+            notion.pages.update(page_id=page_id, properties=updates)
+    except Exception as e:
+        print(f"  ⚠️ 인물 canonical/alias 속성 동기화 실패: {e}")
 
 
 _NOTION_HEADERS = {
@@ -3071,6 +3745,7 @@ def create_person_in_notion_db(
     career: str,
     expertise: str,
     source_url: str = "",
+    alias_name: str = "",
 ) -> Optional[str]:
     """노션 인물 DB에 새 인물 페이지 생성 후 page_id 반환"""
     def rt(text: str) -> list:
@@ -3141,6 +3816,14 @@ def create_person_in_notion_db(
         prop_name = fields["source_url"]
         properties[prop_name] = _build_person_prop_value(
             all_props.get(prop_name, "url"), source_url, rt, ms
+        )
+    if fields.get("nickname"):
+        prop_name = fields["nickname"]
+        properties[prop_name] = _build_person_prop_value(
+            all_props.get(prop_name, "rich_text"),
+            _nickname_value(name, alias_name),
+            rt,
+            ms,
         )
 
     # 코드 속성명이 실제 DB에 없으면 경고
@@ -3391,6 +4074,7 @@ def _run_people_maintenance_light():
             enrich_missing_person_profiles=_enrich_missing_person_profiles,
             auto_dedup_people_db=_auto_dedup_people_db,
             dedup_person_page_opinions=_dedup_person_page_opinions,
+            weekly_identity_audit=_weekly_person_identity_audit,
         )
     )
 
@@ -3414,6 +4098,7 @@ def _run_people_maintenance_once():
             enrich_missing_person_profiles=_enrich_missing_person_profiles,
             auto_dedup_people_db=_auto_dedup_people_db,
             dedup_person_page_opinions=_dedup_person_page_opinions,
+            weekly_identity_audit=_weekly_person_identity_audit,
         )
     )
 
@@ -3431,6 +4116,7 @@ def save_person_to_expert_sheet(
     body_fields_override: Optional[dict] = None,
     confidence_score: str = "",
     confidence_status: str = "",
+    alias_name: str = "",
 ):
     """구글 시트 Economic_Expert 탭에 인물 정보 저장/업데이트"""
     service_save_person_to_expert_sheet(
@@ -3462,6 +4148,7 @@ def save_person_to_expert_sheet(
         body_fields_override=body_fields_override,
         confidence_score=confidence_score,
         confidence_status=confidence_status,
+        alias_name=alias_name,
     )
 
 
@@ -3878,13 +4565,20 @@ def process_person_db(
     channel: str,
 ) -> Optional[str]:
     """인물 DB 처리 통합 함수: 검색 → 생성/업데이트 → 등장 횟수 → 본문 업데이트 → 시트 저장"""
+    canonical_name, alias_name = _resolve_canonical_person_identity(
+        name,
+        affiliation,
+        role,
+        channel=channel,
+    )
     return service_process_person_db(
         notion,
-        name,
+        canonical_name,
         affiliation,
         role,
         opinion,
         channel,
+        alias_name,
         ProcessPersonDeps(
             kst=KST,
             sanitize_person_fields=_sanitize_person_fields,
@@ -3909,6 +4603,8 @@ def process_person_db(
             backfill_person_profile=_backfill_person_profile,
             set_person_source_url_if_missing=_set_person_source_url_if_missing,
             save_person_to_expert_sheet=save_person_to_expert_sheet,
+            sync_person_identity_props=_sync_person_identity_props,
+            person_identity_gate_reasons=_person_identity_gate_reasons,
             logger=logger,
             print_fn=print,
         ),
@@ -4691,6 +5387,377 @@ def _rebuild_expert_sheet(notion: NotionClient):
             print(f"  ⚠️ 헤더 설정 실패: {e}")
 
 
+def _build_expert_snapshot_row(page: dict) -> list[str]:
+    name = _get_person_prop(page, "이름")
+    if not name:
+        return []
+    affiliation = _get_person_prop(page, "소속")
+    role = _get_person_prop(page, "직책")
+    dominant_channel = _get_person_prop(page, "대표 채널") or _get_person_prop(page, "최근 채널")
+    person_types = _get_person_prop(page, "인물 유형")
+    return [
+        page.get("id", ""),
+        name,
+        _get_person_prop(page, "닉네임") or _nickname_value(name),
+        _get_person_prop(page, "신뢰도 상태"),
+        person_types,
+        affiliation,
+        role,
+        dominant_channel,
+        _get_person_prop(page, "TrustScore"),
+        _get_person_prop(page, "TrustScore 밴드"),
+        _get_person_prop(page, "TrustScore 신뢰도"),
+        _get_person_prop(page, "해결 claim 수"),
+        _get_person_prop(page, "대기 claim 수"),
+        _get_person_prop(page, "방향 적중률"),
+        _get_person_prop(page, "알파 점수"),
+        _get_person_prop(page, "근거 제시 점수"),
+        _get_person_prop(page, "입장 번복 플래그 수"),
+        _get_person_prop(page, "마지막 TrustScore 갱신"),
+    ]
+
+
+def _snapshot_person_seed(page: dict) -> dict[str, str]:
+    name = _get_person_prop(page, "이름")
+    return {
+        "person_id": page.get("id", ""),
+        "person_name": name,
+        "identity_status": _get_person_prop(page, "신뢰도 상태"),
+        "person_types": _get_person_prop(page, "인물 유형"),
+        "affiliation": _get_person_prop(page, "소속"),
+        "role": _get_person_prop(page, "직책"),
+        "dominant_channel": _get_person_prop(page, "대표 채널") or _get_person_prop(page, "최근 채널"),
+    }
+
+
+def _trust_value_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return f"{value:.4f}".rstrip("0").rstrip(".")
+    return str(value)
+
+
+def _write_sheet_rows(
+    *,
+    spreadsheet_id: str,
+    tab: str,
+    headers: list[str],
+    end_col: str,
+    full_range: str,
+    rows: list[list[object]],
+    prevent_empty_overwrite: bool = False,
+):
+    service = _get_sheets_service()
+    sheet = service.spreadsheets()
+    try:
+        existing = sheet.values().get(
+            spreadsheetId=spreadsheet_id,
+            range=full_range,
+        ).execute().get("values", [])
+    except Exception as e:
+        print(f"  ⚠️ 시트 조회 실패({tab}): {e}")
+        return
+
+    if prevent_empty_overwrite and not rows and len(existing) > 1:
+        print(f"  ⚠️ 재구성 중단({tab}): 새 데이터 0건. 기존 시트 데이터 유지.")
+        return
+
+    try:
+        payload = [headers] + rows if rows else [headers]
+        sheet.values().update(
+            spreadsheetId=spreadsheet_id,
+            range=f"'{tab}'!A1",
+            valueInputOption="RAW",
+            body={"values": payload},
+        ).execute()
+        old_len = len(existing)
+        new_len = len(rows) + 1
+        if old_len > new_len:
+            sheet.values().clear(
+                spreadsheetId=spreadsheet_id,
+                range=f"'{tab}'!A{new_len+1}:{end_col}{old_len}",
+            ).execute()
+        if rows:
+            print(f"  → {tab}: {len(rows)}행 기록 완료")
+        else:
+            print(f"  → {tab}: 데이터 없음(헤더만 유지)")
+    except Exception as e:
+        print(f"  ⚠️ 시트 기록 실패({tab}): {e}")
+
+
+def _rebuild_expert_snapshot_sheet(notion: NotionClient):
+    """LLM 문맥용 Expert_Snapshot 탭 재구성."""
+    _ensure_tab_exists(EXPERT_SHEET_ID, EXPERT_SNAPSHOT_TAB)
+    pages = _get_all_persons_from_db(notion)
+    seeds = [_snapshot_person_seed(page) for page in pages if _get_person_prop(page, "이름")]
+    bootstrap_stats = service_bootstrap_person_trust_rows(TRUST_DATA_DB_PATH, seeds)
+    trust_rows = service_load_person_trust_rows(TRUST_DATA_DB_PATH)
+    rows: list[list[str]] = []
+    for page in pages:
+        row = _build_expert_snapshot_row(page)
+        if row:
+            trust_row = trust_rows.get(page.get("id", ""), {})
+            if trust_row:
+                row[3] = trust_row.get("identity_status") or row[3]
+                row[4] = trust_row.get("person_types") or row[4]
+                row[5] = trust_row.get("affiliation") or row[5]
+                row[6] = trust_row.get("role") or row[6]
+                row[7] = trust_row.get("dominant_channel") or row[7]
+                row[8] = _trust_value_text(trust_row.get("trust_score_total"))
+                row[9] = trust_row.get("trust_score_band", "")
+                row[10] = _trust_value_text(trust_row.get("trust_score_confidence"))
+                row[11] = _trust_value_text(trust_row.get("resolved_claim_count"))
+                row[12] = _trust_value_text(trust_row.get("pending_claim_count"))
+                row[13] = _trust_value_text(trust_row.get("direction_accuracy"))
+                row[14] = _trust_value_text(trust_row.get("alpha_score"))
+                row[15] = _trust_value_text(trust_row.get("source_transparency_score"))
+                row[16] = _trust_value_text(trust_row.get("contradiction_flag_count"))
+                row[17] = trust_row.get("last_trustscore_updated_at", "")
+            rows.append(row)
+    rows.sort(key=lambda item: ((item[1] or "").strip(), (item[5] or "").strip()))
+    print(
+        f"  → Trust store bootstrap: inserted={bootstrap_stats['inserted']}, "
+        f"updated={bootstrap_stats['updated']}"
+    )
+    _write_sheet_rows(
+        spreadsheet_id=EXPERT_SHEET_ID,
+        tab=EXPERT_SNAPSHOT_TAB,
+        headers=_EXPERT_SNAPSHOT_HEADERS,
+        end_col=EXPERT_SNAPSHOT_END_COL,
+        full_range=EXPERT_SNAPSHOT_FULL_RANGE,
+        rows=rows,
+        prevent_empty_overwrite=True,
+    )
+
+
+def _init_review_queue_sheet():
+    """LLM 검수 큐용 Review_Queue 탭 헤더 보장."""
+    _ensure_tab_exists(EXPERT_SHEET_ID, REVIEW_QUEUE_TAB)
+    service = _get_sheets_service()
+    sheet = service.spreadsheets()
+    try:
+        existing = sheet.values().get(
+            spreadsheetId=EXPERT_SHEET_ID,
+            range=REVIEW_QUEUE_FULL_RANGE,
+        ).execute().get("values", [])
+    except Exception as e:
+        print(f"  ⚠️ 시트 조회 실패({REVIEW_QUEUE_TAB}): {e}")
+        return
+
+    if existing and any(existing[0]):
+        print(f"  → {REVIEW_QUEUE_TAB}: 기존 헤더/데이터 유지")
+        return
+
+    try:
+        sheet.values().update(
+            spreadsheetId=EXPERT_SHEET_ID,
+            range=f"'{REVIEW_QUEUE_TAB}'!A1",
+            valueInputOption="RAW",
+            body={"values": [_REVIEW_QUEUE_HEADERS]},
+        ).execute()
+        print(f"  → {REVIEW_QUEUE_TAB}: 헤더 초기화 완료")
+    except Exception as e:
+        print(f"  ⚠️ 헤더 설정 실패({REVIEW_QUEUE_TAB}): {e}")
+
+
+def _sync_review_queue_sheet():
+    _ensure_tab_exists(EXPERT_SHEET_ID, REVIEW_QUEUE_TAB)
+    service = _get_sheets_service()
+    sheet = service.spreadsheets()
+    try:
+        existing = sheet.values().get(
+            spreadsheetId=EXPERT_SHEET_ID,
+            range=REVIEW_QUEUE_FULL_RANGE,
+        ).execute().get("values", [])
+    except Exception as e:
+        print(f"  ⚠️ 시트 조회 실패({REVIEW_QUEUE_TAB}): {e}")
+        return
+
+    preserved: dict[str, list[str]] = {}
+    for row in existing[1:]:
+        if not row:
+            continue
+        queue_id = row[0] if len(row) > 0 else ""
+        if queue_id and queue_id not in preserved:
+            preserved[queue_id] = row
+
+    queue_rows = service_load_review_queue_rows(TRUST_DATA_DB_PATH)
+    generated_ids: set[str] = set()
+    rows: list[list[str]] = []
+    for item in queue_rows:
+        queue_id = item["queue_id"]
+        generated_ids.add(queue_id)
+        prev = preserved.get(queue_id, [])
+        prev_status = prev[4] if len(prev) > 4 else ""
+        merged_status = prev_status if prev_status == "in_progress" else item["status"]
+        row = [
+            queue_id,
+            item["created_at"],
+            item["queue_type"],
+            item["priority"],
+            merged_status,
+            item["target_type"],
+            item["target_id"],
+            item["target_name"],
+            item["source_url"],
+            item["evidence_summary"],
+            item["suggested_action"],
+            prev[11] if len(prev) > 11 else item["owner"],
+            prev[12] if len(prev) > 12 else item["last_reviewed_at"],
+            prev[13] if len(prev) > 13 else item["notes"],
+        ]
+        rows.append(row)
+
+    for queue_id, prev in preserved.items():
+        if queue_id in generated_ids:
+            continue
+        if not prev:
+            continue
+        padded = prev + [""] * max(0, len(_REVIEW_QUEUE_HEADERS) - len(prev))
+        if len(padded) > 9 and "[DB-resolved]" not in padded[9]:
+            padded[9] = f"[DB-resolved] {padded[9]}".strip()
+        rows.append(padded[:len(_REVIEW_QUEUE_HEADERS)])
+
+    _write_sheet_rows(
+        spreadsheet_id=EXPERT_SHEET_ID,
+        tab=REVIEW_QUEUE_TAB,
+        headers=_REVIEW_QUEUE_HEADERS,
+        end_col=REVIEW_QUEUE_END_COL,
+        full_range=REVIEW_QUEUE_FULL_RANGE,
+        rows=rows,
+        prevent_empty_overwrite=False,
+    )
+
+
+def _parse_resolution_notes(raw: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for part in (raw or "").split(";"):
+        chunk = part.strip()
+        if not chunk or "=" not in chunk:
+            continue
+        key, value = chunk.split("=", 1)
+        k = key.strip()
+        v = value.strip()
+        if k:
+            out[k] = v
+    return out
+
+
+def apply_review_queue_resolutions():
+    _ensure_tab_exists(EXPERT_SHEET_ID, REVIEW_QUEUE_TAB)
+    service = _get_sheets_service()
+    sheet = service.spreadsheets()
+    values = sheet.values().get(
+        spreadsheetId=EXPERT_SHEET_ID,
+        range=REVIEW_QUEUE_FULL_RANGE,
+    ).execute().get("values", [])
+    registry = service_load_claim_override_registry(TRUST_CLAIM_OVERRIDE_PATH)
+    claim_overrides = registry.get("claim_overrides", {}) or {}
+    applied = 0
+    skipped = 0
+    for row in values[1:]:
+        if len(row) < 14:
+            skipped += 1
+            continue
+        queue_type = row[2].strip()
+        status = row[4].strip().lower()
+        target_type = row[5].strip()
+        target_id = row[6].strip()
+        notes = row[13].strip()
+        if queue_type not in ("symbol_review", "outcome_review") or status != "resolved" or target_type != "claim" or not target_id:
+            continue
+        parsed = _parse_resolution_notes(notes)
+        stooq_symbol = parsed.get("stooq_symbol", "")
+        benchmark_symbol = parsed.get("benchmark_symbol", "")
+        anchor_at = parsed.get("anchor_at", "")
+        if anchor_at:
+            try:
+                datetime.fromisoformat(anchor_at)
+            except Exception:
+                print(f"  ⚠️ anchor_at 형식 오류 스킵: claim={target_id}, anchor_at={anchor_at}")
+                skipped += 1
+                continue
+        if not any((stooq_symbol, benchmark_symbol, anchor_at)):
+            skipped += 1
+            continue
+        existing_override = claim_overrides.get(target_id, {})
+        updated_override = {
+            "stooq_symbol": stooq_symbol or existing_override.get("stooq_symbol", ""),
+            "benchmark_symbol": benchmark_symbol or existing_override.get("benchmark_symbol", ""),
+            "anchor_at": anchor_at or existing_override.get("anchor_at", ""),
+            "note": parsed.get("note", existing_override.get("note", "manual_review_queue_resolution")),
+            "resolved_at": datetime.now().astimezone().isoformat(),
+        }
+        claim_overrides[target_id] = updated_override
+        applied += 1
+    registry["claim_overrides"] = claim_overrides
+    service_save_claim_override_registry(TRUST_CLAIM_OVERRIDE_PATH, registry)
+    print(f"  → review queue resolution 반영: applied={applied}, skipped={skipped}")
+
+
+def init_trust_store():
+    info = service_init_trust_data_db(TRUST_DATA_DB_PATH)
+    print(f"  → trust store 준비 완료: {info['db_path']}")
+
+
+def bootstrap_trust_store():
+    notion = get_notion_client()
+    pages = _get_all_persons_from_db(notion)
+    seeds = [_snapshot_person_seed(page) for page in pages if _get_person_prop(page, "이름")]
+    stats = service_bootstrap_person_trust_rows(TRUST_DATA_DB_PATH, seeds)
+    print(
+        f"  → trust store bootstrap 완료: inserted={stats['inserted']}, "
+        f"updated={stats['updated']}"
+    )
+
+
+def ingest_claim_samples():
+    notion = get_notion_client()
+    pages = _get_all_persons_from_db(notion)
+    person_name_to_id: dict[str, str] = {}
+    for page in pages:
+        name = _get_person_prop(page, "이름")
+        if name:
+            person_name_to_id[name] = page.get("id", "")
+    docs = service_load_claim_sample_docs(CLAIM_SAMPLE_DIR)
+    stats = service_ingest_claim_samples(TRUST_DATA_DB_PATH, docs, person_name_to_id)
+    print(
+        f"  → claim sample ingest 완료: inserted={stats['inserted']}, "
+        f"updated={stats['updated']}, skipped={stats['skipped']}"
+    )
+
+
+def recompute_trust_scores():
+    stats = service_recompute_person_trust_scores(TRUST_DATA_DB_PATH)
+    print(f"  → trust score 재계산 완료: updated={stats['updated']}")
+
+
+def refresh_claim_outcomes(force: bool = False):
+    mapping_registry = service_load_symbol_mapping_registry(TRUST_SYMBOL_MAP_PATH)
+    override_registry = service_load_claim_override_registry(TRUST_CLAIM_OVERRIDE_PATH)
+    stats = service_refresh_claim_outcomes(
+        TRUST_DATA_DB_PATH,
+        force=force,
+        mapping_registry=mapping_registry,
+        override_registry=override_registry,
+    )
+    print(
+        f"  → claim outcome 갱신 완료: updated={stats['updated']}, "
+        f"unresolved={stats['unresolved']}, needs_review={stats['needs_review']}"
+    )
+
+
+def sync_llm_context_sheets():
+    """LLM 문맥용 시트 탭 동기화."""
+    notion = get_notion_client()
+    service_init_trust_data_db(TRUST_DATA_DB_PATH)
+    _rebuild_expert_snapshot_sheet(notion)
+    _sync_review_queue_sheet()
+
+
 def _dedup_person_page_opinions(notion: NotionClient):
     """인물 DB 전체 페이지의 본문 발언 중복을 정리."""
     pages = _get_all_persons_from_db(notion)
@@ -5254,6 +6321,15 @@ def _finalize_page_with_analysis(
     verified_name, verified_affiliation, verified_role = _sanitize_person_fields(
         verified_name, verified_affiliation, verified_role
     )
+    canonical_name, alias_name = _resolve_canonical_person_identity(
+        verified_name,
+        verified_affiliation,
+        verified_role,
+        channel=channel,
+    )
+    if alias_name:
+        print(f"  [PERSON] canonical/alias 적용: {canonical_name} (alias: {alias_name})")
+    verified_name = canonical_name
 
     products = analysis.get("mentioned_products", [])
     if products:
@@ -5267,6 +6343,7 @@ def _finalize_page_with_analysis(
         verified_name=verified_name,
         verified_affiliation=verified_affiliation,
         role=verified_role,
+        channel=channel,
     )
     print(f"  ✓ 노션 기록 완료")
 
@@ -5280,6 +6357,8 @@ def _finalize_page_with_analysis(
         opinion=analysis.get("opinion", ""),
         channel=metadata.get("channel", ""),
     )
+    if person_page_id and alias_name:
+        _sync_person_identity_props(notion, person_page_id, verified_name, alias_name)
 
     # 콘텐츠 DB ↔ 인물 DB relation 연결
     if person_page_id:
@@ -5419,15 +6498,22 @@ def _sync_person_and_link(
     date_str: str,
 ) -> Optional[str]:
     """인물 DB에 등록/업데이트 후 콘텐츠 DB 페이지와 relation 연결. person_page_id 반환."""
+    canonical_name, alias_name = _resolve_canonical_person_identity(
+        name,
+        affiliation,
+        role,
+        channel=channel,
+    )
     return service_sync_person_and_link(
         notion,
         content_page_id,
-        name,
+        canonical_name,
         affiliation,
         role,
         opinion,
         channel,
         date_str,
+        alias_name,
         SyncPersonAndLinkDeps(
             sanitize_person_fields=_sanitize_person_fields,
             person_db_lock=_PERSON_DB_LOCK,
@@ -5453,6 +6539,8 @@ def _sync_person_and_link(
             resolve_content_person_relation_prop=_resolve_content_person_relation_prop,
             content_person_relation_prop=CONTENT_PERSON_RELATION_PROP,
             save_person_to_expert_sheet=save_person_to_expert_sheet,
+            sync_person_identity_props=_sync_person_identity_props,
+            person_identity_gate_reasons=_person_identity_gate_reasons,
             logger=logger,
             print_fn=print,
         ),
@@ -6725,6 +7813,7 @@ async def people_maintenance_scheduler():
             people_dawn_enabled=PEOPLE_DAWN_ENABLED,
             people_dawn_hour=PEOPLE_DAWN_HOUR,
             people_dawn_minute=PEOPLE_DAWN_MINUTE,
+            people_full_clean_weekday=PEOPLE_FULL_CLEAN_WEEKDAY,
             run_light=_run_people_maintenance_light,
             run_full=_run_people_maintenance_once,
         )
@@ -6838,6 +7927,18 @@ if __name__ == "__main__":
             dedup_all=dedup_all,
             get_notion_client=get_notion_client,
             sync_sheets_from_notion=sync_sheets_from_notion,
+            check_content_sync_status=check_content_sync_status,
+            reconcile_content_sync=reconcile_content_sync,
+            sync_expert_snapshot_sheet=lambda: _rebuild_expert_snapshot_sheet(get_notion_client()),
+            init_review_queue_sheet=_init_review_queue_sheet,
+            sync_review_queue_sheet=_sync_review_queue_sheet,
+            apply_review_queue_resolutions=apply_review_queue_resolutions,
+            sync_llm_context_sheets=sync_llm_context_sheets,
+            init_trust_store=init_trust_store,
+            bootstrap_trust_store=bootstrap_trust_store,
+            ingest_claim_samples=ingest_claim_samples,
+            recompute_trust_scores=recompute_trust_scores,
+            refresh_claim_outcomes=refresh_claim_outcomes,
             send_daily_briefing=send_daily_briefing,
             send_weekly_report=send_weekly_report,
             sync_people_from_notion=sync_people_from_notion,
@@ -6854,6 +7955,7 @@ if __name__ == "__main__":
             enrich_all_people=enrich_all_people,
             check_runtime_keys=check_runtime_keys,
             run_healthcheck_once=run_healthcheck_once,
+            check_notion_access=check_notion_access,
             run_retry_worker=run_retry_worker,
             send_telegram_channel_message=send_telegram_channel_message,
         ),

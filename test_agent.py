@@ -8,6 +8,114 @@ import json
 import os
 import sys
 
+# ── 0단계: 콘텐츠 동기화 로직 테스트 ─────────────────────
+def test_content_sync_logic():
+    print("=" * 60)
+    print("0단계: 콘텐츠 동기화 로직 테스트")
+    print("=" * 60)
+
+    try:
+        from agent import _content_record_from_sheet_row, _content_record_to_sheet_row
+        from services.content_sync import ContentSyncRecord, classify_sync
+    except ModuleNotFoundError as e:
+        print(f"  ⚠️ 의존성 모듈 없음으로 0단계 스킵: {e}")
+        return None
+
+    row = {
+        "유튜브 URL": "https://youtu.be/example123",
+        "영상 제목": "테스트 영상",
+        "채널명": "테스트채널",
+        "주제(해시태그)": "#금리 #달러",
+        "한줄 요약": "요약",
+        "출연자(소속/직책/이름)": "테스트증권 / 애널리스트 / 홍길동",
+        "인물 의견": "의견",
+        "언급 상품": "QQQ, TLT",
+        "주요 섹터": "반도체, 금융",
+        "경기 전망": "중립: 변동성 대응",
+        "처리일시": "2026-03-29 15:00",
+    }
+
+    record = _content_record_from_sheet_row(row)
+    all_ok = True
+    if not record:
+        print("  ❌ 시트 행 매핑 실패")
+        return False
+
+    checks = [
+        ("채널명", record.channel == "테스트채널"),
+        ("해시태그", record.hashtags == "#금리 #달러"),
+        ("언급 상품", record.mentioned_products == "QQQ, TLT"),
+        ("핵심 섹터", record.key_sectors == "반도체, 금융"),
+        ("경제 전망", record.economic_outlook == "중립: 변동성 대응"),
+    ]
+    for label, ok in checks:
+        print(f"  {'✅' if ok else '❌'} {label}")
+        if not ok:
+            all_ok = False
+
+    row_values = _content_record_to_sheet_row(record)
+    layout_ok = row_values[2] == "테스트채널" and row_values[7] == "QQQ, TLT" and row_values[9] == "중립: 변동성 대응"
+    print(f"  {'✅' if layout_ok else '❌'} 시트 행 순서")
+    if not layout_ok:
+        all_ok = False
+
+    notion_same = ContentSyncRecord(
+        url=record.url,
+        title=record.title,
+        channel="테스트채널",
+        hashtags="#달러 #금리",
+        summary=record.summary,
+        person_str=record.person_str,
+        opinion=record.opinion,
+        mentioned_products="TLT, QQQ",
+        key_sectors="금융, 반도체",
+        economic_outlook=record.economic_outlook,
+        timestamp=record.timestamp,
+        source="notion",
+        source_ref="page-1",
+    )
+    notion_conflict = ContentSyncRecord(
+        url="https://youtu.be/conflict1",
+        title="충돌 영상",
+        channel="채널A",
+        hashtags="#주식",
+        summary="A요약",
+        person_str="A",
+        opinion="A의견",
+        mentioned_products="SPY",
+        key_sectors="기술",
+        economic_outlook="상승",
+        timestamp="2026-03-29 15:01",
+        source="notion",
+        source_ref="page-2",
+    )
+    sheet_conflict = ContentSyncRecord(
+        url="https://youtu.be/conflict1",
+        title="충돌 영상",
+        channel="채널B",
+        hashtags="#주식",
+        summary="B요약",
+        person_str="A",
+        opinion="A의견",
+        mentioned_products="SPY",
+        key_sectors="기술",
+        economic_outlook="상승",
+        timestamp="2026-03-29 15:01",
+        source="sheet",
+        source_ref="https://youtu.be/conflict1",
+    )
+    sync_result = classify_sync(
+        [notion_same, notion_conflict],
+        [record, sheet_conflict],
+    )
+
+    class_ok = len(sync_result["in_sync"]) == 1 and len(sync_result["field_conflict"]) == 1
+    print(f"  {'✅' if class_ok else '❌'} diff 분류")
+    if not class_ok:
+        all_ok = False
+
+    return all_ok
+
 # ── 1단계: 블록 생성 로직 테스트 ─────────────────────────
 def test_block_builder():
     print("=" * 60)
@@ -207,6 +315,7 @@ def test_full_pipeline(youtube_url: str):
 
 # ── 실행 ─────────────────────────────────────────────────
 if __name__ == "__main__":
+    step0_ok = test_content_sync_logic()
     step1_ok = test_block_builder()
 
     # 커맨드라인 인수로 YouTube URL 전달 시 2단계 실행
@@ -217,6 +326,10 @@ if __name__ == "__main__":
         print("\n  💡 2단계 실행: python test_agent.py <YouTube_URL>")
 
     print("\n" + "=" * 60)
+    if step0_ok is None:
+        print("0단계 결과: ⚠️ 스킵 (로컬 의존성 모듈 필요)")
+    else:
+        print("0단계 결과:", "✅ 통과" if step0_ok else "❌ 실패")
     if step1_ok is None:
         print("1단계 결과: ⚠️ 스킵 (로컬 의존성 모듈 필요)")
     else:

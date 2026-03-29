@@ -229,6 +229,46 @@ Updated: 2026-03-11 (KST)
   - 저장/조회 원본을 JSON에서 SQLite로 전환
   - 기존 `person_review_memory.json`이 있으면 최초 로드 시 SQLite로 1회 마이그레이션
 
+### 18. Notion DB ↔ Google Sheets 스키마 정렬 (2026-03-29)
+- 파일:
+  - `adapters/notion_content_repo.py`
+  - `agent.py`
+  - Notion 경제 콘텐츠 DB (collection://314883f1-56f5-80ce-9afb-000b0f132728)
+- 변경 내용:
+  - Notion DB `주제` 컬럼 → `해시태그`로 rename (Sheets 컬럼명과 통일)
+  - Notion DB에 누락 컬럼 4개 추가: `채널`, `언급 상품`, `핵심 섹터`, `경제 전망`
+  - `notion_content_repo.write_result`에 `channel` 파라미터 추가 및 4개 신규 필드 기록 로직 추가
+  - `get_unprocessed_pages` 미처리 sentinel 필터를 `주제` → `해시태그`로 변경
+  - `agent.write_notion_result` 래퍼에 `channel` 파라미터 추가
+  - `_finalize_page_with_analysis`에서 `write_notion_result` 호출 시 `channel=metadata.get("channel", "")` 전달
+- 정렬 후 Notion/Sheets 공통 필드:
+  - URL, 콘텐츠 제목, 채널, 해시태그, 한 줄 요약, 출연자(인물), 인물의견, 언급 상품, 핵심 섹터, 경제 전망, 처리일시
+
+### 19. 콘텐츠 양방향 정렬 마무리 baseline (2026-03-29)
+- 파일:
+  - `services/content_sync.py`
+  - `entrypoints/cli.py`
+  - `agent.py`
+  - `test_agent.py`
+  - `README.md`
+  - `handoffs/content-sync-report-2026-03-29.md`
+- 변경 내용:
+  - 콘텐츠 공통 필드 비교/정규화 로직을 `services/content_sync.py`로 분리
+  - 새 CLI 추가:
+    - `--check-content-sync`
+    - `--reconcile-content-sync`
+  - `sync_sheets_from_notion()`을 구 스키마(`주제`, 빈 `채널`) 의존에서 제거하고 새 필드 기준 백필로 정리
+  - Notion 속성값 우선, 본문 블록 파싱은 fallback으로만 사용
+  - `only_sheet` 역반영 시 URL 기준 기존 Notion 페이지 재사용 후 속성만 반영
+  - `field_conflict`는 자동 반영하지 않고 수동 검토 대상으로 유지
+  - 행 수 차이만으로 시트를 지우는 destructive validate 로직을 제거하고 diff 점검 리포트 기반으로 전환
+  - 콘텐츠 동기화 테스트 0단계 추가
+- 현재 운영 blocker:
+  - 런타임 `NOTION_API_KEY`는 유효하지만 `NOTION_DATABASE_ID=314883f1-56f5-809e-97ba-fa187bea7e2e`에 대해 `404 object_not_found`
+  - `경제 전문가 DB`는 접근 가능하므로 토큰 자체 문제가 아니라 `경제 콘텐츠 DB` 공유/권한 문제일 가능성이 큼
+  - 따라서 `--check-content-sync`는 현재 blocked 리포트를 남기고 정상 종료하도록 처리
+  - Notion integration 정본은 `노션-개발`로 고정하고, legacy/archive 키는 운영 기준에서 제외
+
 ## 검증 결과
 - AST parse: 통과
 - `python3.10 agent.py --help`: 통과
