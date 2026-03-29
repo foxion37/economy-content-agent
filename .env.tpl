@@ -1,0 +1,72 @@
+# 노션
+NOTION_API_KEY=op://home-dev/notion/api-key
+
+# 유튜브
+YOUTUBE_API_KEY=op://home-dev/youtube/api-key
+
+# AI
+ANTHROPIC_API_KEY=op://home-dev/anthropic/api-key
+GEMINI_API_KEY=op://home-dev/gemini/api-key
+
+# 구글 검색 (CSE)
+GOOGLE_CSE_ID=474fd499793f544e3
+SERPER_API_KEY=op://home-dev/serper/api-key
+GOOGLE_CSE_API_KEY=op://home-dev/google-cse/api-key
+
+# 전문가 DB / 시트
+PERSON_DB_ID=31a883f1-56f5-8075-a3ff-e8ee3d83d254
+EXPERT_SHEET_ID=1UQZnkRUNAn1iGiLGtnqfMwEhYbnTBoKpr9J9Y51eYYw
+EXPERT_SHEET_TAB=Economic_Expert
+CONTENT_PERSON_RELATION_PROP=인물
+PEOPLE_SYNC_ON_START=1
+PEOPLE_SYNC_INTERVAL_MIN=360
+PEOPLE_DAWN_ENABLED=1
+PEOPLE_DAWN_HOUR=3
+PEOPLE_DAWN_MINUTE=0
+
+# 텔레그램
+TELEGRAM_BOT_TOKEN=op://home-dev/telegram-economy-bot/token
+TELEGRAM_CHANNEL_ID=-1003885136223
+TELEGRAM_REVIEW_CHAT_ID=6407400094
+TELEGRAM_BOT_USERNAME=Eoconomi_Content_Bot
+REVIEW_ALERTS_ENABLED=0
+
+# 프로젝트 식별자 / 시트
+NOTION_DATABASE_ID="314883f1-56f5-809e-97ba-fa187bea7e2e"
+GOOGLE_SHEET_ID="1UQZnkRUNAn1iGiLGtnqfMwEhYbnTBoKpr9J9Y51eYYw"
+INDICATOR_SHEET_ID="1fMb1g5HEaAjDjJq5D_PtQEsmBeus4TXr6v8L-36bcp0"
+DAILY_BRIEFING_SHEET_ID="1UQZnkRUNAn1iGiLGtnqfMwEhYbnTBoKpr9J9Y51eYYw"
+DAILY_BRIEFING_TAB="Daily_Briefing_Log"
+DAILY_HIGHLIGHT_TAB="Daily_Highlights"
+
+# 선택 기능
+TELEGRAM_ADMIN_CHAT_IDS=""
+OPS_INSIGHT_CHAT_ID=""
+
+# 로컬 경로
+GOOGLE_SERVICE_ACCOUNT_FILE="/Users/barq/developer/projects/economy-content-agent/credentials.json"
+PERSON_REVIEW_MEMORY_PATH="/Users/barq/developer/projects/economy-content-agent/person_review_memory.json"
+PERSON_REVIEW_BACKUP_DIR="/Users/barq/developer/projects/economy-content-agent/backups"
+FAILED_URL_QUEUE_PATH="/Users/barq/developer/projects/economy-content-agent/failed_url_queue.json"
+OPS_EVENT_LOG_PATH="/Users/barq/developer/projects/economy-content-agent/ops_events.jsonl"
+
+# 운영 튜닝
+PEOPLE_LIGHT_INTERVAL_MIN="5"
+PEOPLE_DEDUP_INTERVAL_MIN="5"
+PEOPLE_ACCUMULATE_MODE="1"
+PEOPLE_PURGE_ON_MAINTENANCE="0"
+PEOPLE_REBUILD_ON_MAINTENANCE="0"
+PERSON_UNCERTAIN_ACTION="notify"
+PERSON_DB_SCHEMA_CACHE_SEC="300"
+PERSON_DB_LIST_CACHE_SEC="20"
+PERSON_SYNC_SLEEP_SEC="0.2"
+PERSON_CONFIDENCE_MIN="0.62"
+PERSON_CONFIDENCE_STRICT_MIN="0.48"
+PERSON_MATCH_COOLDOWN_SEC="600"
+PERSON_REVIEW_RETENTION_DAYS="90"
+FAILED_URL_RETRY_MAX="3"
+FAILED_URL_RETRY_INTERVAL_MIN="10"
+FAILED_RETRY_SCHEDULER_ENABLED="1"
+EXPERT_SHEET_VERIFY_WRITE="0"
+OPS_INSIGHT_INTERVAL_MIN="360"
+OPS_INSIGHT_ENABLED="1"
